@@ -7,7 +7,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 API_BASE = "https://www.footour.lv/api"
-MASTER_TOURNAMENT_ID = 58
+MASTER_TOURNAMENT_ID = 59
 TOURNAMENT_ID = 371
 CALENDARS_DIR = Path(__file__).parent / "calendars"
 RIGA_TZ_OFFSET = timedelta(hours=3)
@@ -17,32 +17,29 @@ def fetch_json(url):
     with urllib.request.urlopen(req, timeout=30) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
-def get_tournament_name():
-    data = fetch_json(f"{API_BASE}/masterTournamentSettings?masterTournamentId={MASTER_TOURNAMENT_ID}")
-    for rec in data.get("records", []):
-        if rec["id"] == 353:
-            return rec["name"]
-    return "Minifootball"
+def get_data():
+    cal = fetch_json(f"{API_BASE}/matchCalendar?masterTournamentId={MASTER_TOURNAMENT_ID}&tid={TOURNAMENT_ID}")
+    teams = fetch_json(f"{API_BASE}/teams?masterTournamentId={MASTER_TOURNAMENT_ID}&tid={TOURNAMENT_ID}")
 
-def get_teams():
-    data = fetch_json(f"{API_BASE}/teams?masterTournamentId={MASTER_TOURNAMENT_ID}&tid={TOURNAMENT_ID}")
-    teams = {}
-    for rec in data.get("records", []):
-        teams[rec["id"]] = rec["team_name"]
-    return teams
+    tournament_name = cal["records"].get("superTournamentName", "Minifootball")
 
-def get_matches():
-    data = fetch_json(f"{API_BASE}/matchCalendar?masterTournamentId={MASTER_TOURNAMENT_ID}&tid={TOURNAMENT_ID}")
-    records = data.get("records", {})
+    team_map = {}
+    for rec in teams.get("records", []):
+        team_map[rec["id"]] = rec["team_name"]
+
     all_matches = []
-    for st_id, st in records.get("subTournaments", {}).items():
+    for st_id, st in cal["records"].get("subTournaments", {}).items():
+        st_name = st.get("tournamentName", "")
         for stage_id, stage in st.get("stages", {}).items():
             matches = stage.get("matches", {})
             for m in matches.get("prevMatches", []):
+                m["_sub_tournament"] = st_name
                 all_matches.append(m)
             for m in matches.get("nextMatches", []):
+                m["_sub_tournament"] = st_name
                 all_matches.append(m)
-    return all_matches
+
+    return tournament_name, team_map, all_matches
 
 def format_dt(match_datetime_str):
     dt = datetime.strptime(match_datetime_str, "%Y-%m-%d %H:%M:%S")
@@ -68,11 +65,8 @@ def escape_ics(text):
 def format_ics_date(dt):
     return dt.strftime("%Y%m%dT%H%M%S")
 
-def build_calendar(team_id, team_name, all_teams, matches, tournament_name):
-    team_matches = []
-    for m in matches:
-        if m["home_team_id"] == team_id or m["away_team_id"] == team_id:
-            team_matches.append(m)
+def build_calendar(team_id, team_name, matches, tournament_name):
+    team_matches = [m for m in matches if m["home_team_id"] == team_id or m["away_team_id"] == team_id]
 
     lines = []
     lines.append("BEGIN:VCALENDAR")
@@ -89,7 +83,6 @@ def build_calendar(team_id, team_name, all_teams, matches, tournament_name):
         dt = format_dt(m["match_datetime"])
         is_home = m["home_team_id"] == team_id
         opponent = m["away_team_name"] if is_home else m["home_team_name"]
-
         is_midnight = m["match_datetime"].endswith(" 00:00:00")
 
         if is_home:
@@ -97,13 +90,14 @@ def build_calendar(team_id, team_name, all_teams, matches, tournament_name):
         else:
             summary = f"@ {opponent} (A)"
 
-        score_parts = []
-        if m.get("home_team_full_time_score") is not None and m.get("away_team_full_time_score") is not None:
-            hs = m["home_team_full_time_score"]
-            aws = m["away_team_full_time_score"]
-            score_parts.append(f"{hs}:{aws}")
-        if score_parts:
-            summary += f" [{', '.join(score_parts)}]"
+        st = m.get("_sub_tournament", "")
+        if st and st != "Čempionāts":
+            summary = f"[{st}] {summary}"
+
+        hs = m.get("home_team_full_time_score")
+        aws = m.get("away_team_full_time_score")
+        if hs is not None and aws is not None:
+            summary += f" [{hs}:{aws}]"
 
         duration = timedelta(hours=1, minutes=15) if not is_midnight else timedelta(days=0)
         dt_end = dt + duration if not is_midnight else dt
@@ -118,11 +112,13 @@ def build_calendar(team_id, team_name, all_teams, matches, tournament_name):
             lines.append(f"DTSTART;TZID=Europe/Riga:{format_ics_date(dt)}")
             lines.append(f"DTEND;TZID=Europe/Riga:{format_ics_date(dt_end)}")
         lines.append(f"SUMMARY:{escape_ics(summary)}")
-        desc = f"Minifootball: {m['home_team_name']} vs {m['away_team_name']}"
+        desc = f"{m['home_team_name']} vs {m['away_team_name']}"
+        if st:
+            desc = f"[{st}] {desc}"
         if is_midnight:
             desc += " (time TBC)"
-        if score_parts:
-            desc += f" | Score: {m['home_team_full_time_score']}-{m['away_team_full_time_score']}"
+        if hs is not None and aws is not None:
+            desc += f" | Score: {hs}-{aws}"
         lines.append(f"DESCRIPTION:{escape_ics(desc)}")
         lines.append(f"URL:https://fta.lv/synottip/2026/calendar/{TOURNAMENT_ID}")
         lines.append("END:VEVENT")
@@ -133,13 +129,14 @@ def build_calendar(team_id, team_name, all_teams, matches, tournament_name):
 def main():
     CALENDARS_DIR.mkdir(parents=True, exist_ok=True)
 
-    tournament_name = get_tournament_name()
-    teams = get_teams()
-    matches = get_matches()
+    for f in CALENDARS_DIR.glob("*.ics"):
+        f.unlink()
+
+    tournament_name, teams, matches = get_data()
 
     for team_id, team_name in teams.items():
         slug = slugify(team_name)
-        ics_content = build_calendar(team_id, team_name, teams, matches, tournament_name)
+        ics_content = build_calendar(team_id, team_name, matches, tournament_name)
         filepath = CALENDARS_DIR / f"{slug}.ics"
         filepath.write_text(ics_content, encoding="utf-8")
         print(f"Created {filepath}")
