@@ -81,14 +81,9 @@ def build_calendar(team_id, team_name, matches, tournament_name):
 
     for m in sorted(team_matches, key=lambda x: x["match_datetime"]):
         dt = format_dt(m["match_datetime"])
-        is_home = m["home_team_id"] == team_id
-        opponent = m["away_team_name"] if is_home else m["home_team_name"]
         is_midnight = m["match_datetime"].endswith(" 00:00:00")
 
-        if is_home:
-            summary = f"vs {opponent} (H)"
-        else:
-            summary = f"@ {opponent} (A)"
+        summary = f"{m['home_team_name']} vs {m['away_team_name']}"
 
         st = m.get("_sub_tournament", "")
         if st and st != "Čempionāts":
