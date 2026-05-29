@@ -94,7 +94,7 @@ def build_calendar(team_id, team_name, matches, tournament_name):
         if hs is not None and aws is not None:
             summary += f" [{hs}:{aws}]"
 
-        duration = timedelta(hours=1, minutes=15) if not is_midnight else timedelta(days=0)
+        duration = timedelta(hours=1) if not is_midnight else timedelta(days=0)
         dt_end = dt + duration if not is_midnight else dt
 
         lines.append("BEGIN:VEVENT")
